@@ -1,14 +1,17 @@
 """
-Trading strategy — matches Binance-derived BTC directional signals
+Real-time trading strategy — matches Binance-derived BTC directional signals
 to Polymarket prediction markets and generates trade decisions.
+
+Operates on LiveMarketState which is updated continuously via WebSocket.
 """
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 
-from src.binance_data import BinanceSnapshot, estimate_btc_direction
-from src.config import MAX_POSITION_SIZE, MIN_EDGE, get_logger
+from src.binance_data import LiveMarketState, estimate_btc_direction
+from src.config import MAX_POSITION_SIZE, MIN_EDGE, TRADE_COOLDOWN, get_logger
 from src.polymarket_client import BtcMarket
 
 log = get_logger(__name__)
@@ -26,6 +29,7 @@ class TradeSignal:
     market_probability: float
     direction: str  # "up" or "down"
     reasons: list[str]
+    urgency: float  # 0.0-1.0, how urgent (based on signal strength + leading indicators)
 
 
 def parse_market_direction(market: BtcMarket) -> Optional[str]:
@@ -112,30 +116,66 @@ def extract_price_target(market: BtcMarket) -> Optional[float]:
     return None
 
 
+def _compute_urgency(state: LiveMarketState, edge: float) -> float:
+    """
+    Compute urgency score based on how strongly leading indicators agree.
+    High urgency = act now, low urgency = can wait.
+    """
+    urgency = 0.0
+
+    # Strong book imbalance = urgent
+    urgency += min(abs(state.book_imbalance), 0.4) * 0.5
+
+    # Extreme trade flow = urgent
+    flow_deviation = abs(state.trade_flow_ratio - 0.5)
+    urgency += min(flow_deviation, 0.2) * 1.0
+
+    # Whale activity = urgent
+    whale_total = state.large_buy_count_5m + state.large_sell_count_5m
+    if whale_total > 0:
+        urgency += 0.15
+
+    # Large edge = urgent
+    urgency += min(abs(edge), 0.15) * 1.5
+
+    return min(urgency, 1.0)
+
+
 def generate_signals(
-    snapshot: BinanceSnapshot,
+    state: LiveMarketState,
     markets: list[BtcMarket],
+    last_trade_times: dict[str, float],
 ) -> list[TradeSignal]:
     """
-    Match Binance directional estimate with Polymarket markets
+    Match real-time Binance directional estimate with Polymarket markets
     and generate trade signals where we have edge.
+
+    Args:
+        state: Live market state from WebSocket streams
+        markets: List of active BTC markets with prices
+        last_trade_times: condition_id -> last trade timestamp (for cooldown)
     """
-    direction_estimate = estimate_btc_direction(snapshot)
+    if not state.ready:
+        log.debug("Market state not ready yet, skipping signal generation")
+        return []
+
+    direction_estimate = estimate_btc_direction(state)
     our_direction = direction_estimate["direction"]
     our_confidence = direction_estimate["confidence"]
     reasons = direction_estimate["reasons"]
 
-    log.info(
-        "Strategy: BTC direction=%s, confidence=%.3f",
-        our_direction, our_confidence,
-    )
-
     signals = []
+    now = time.time()
 
     for market in markets:
+        # Cooldown check
+        cid = market.condition_id
+        last_trade = last_trade_times.get(cid, 0)
+        if now - last_trade < TRADE_COOLDOWN:
+            continue
+
         market_direction = parse_market_direction(market)
         if market_direction is None:
-            log.debug("Skipping market (can't parse direction): %s", market.question)
             continue
 
         # Determine what our model says the YES probability should be
@@ -152,51 +192,44 @@ def generate_signals(
         # Calculate edge
         edge = our_yes_prob - market_yes_price
 
-        # Also consider the price target relative to current price
+        # Discount edge for distant price targets
         price_target = extract_price_target(market)
-        if price_target is not None:
-            distance_pct = abs(snapshot.price - price_target) / snapshot.price * 100
-            # If the target is very far from current price, reduce our confidence
+        if price_target is not None and state.price > 0:
+            distance_pct = abs(state.price - price_target) / state.price * 100
             if distance_pct > 10:
-                edge *= 0.5  # Halve edge for distant targets
-
-        log.info(
-            "Market: '%s' | direction=%s | our_yes=%.3f | mkt_yes=%.3f | edge=%.3f",
-            market.question[:50], market_direction,
-            our_yes_prob, market_yes_price, edge,
-        )
+                edge *= 0.5
 
         if abs(edge) < MIN_EDGE:
-            log.debug("Edge too small (%.3f < %.3f), skipping", abs(edge), MIN_EDGE)
             continue
 
-        # Decide trade direction and sizing
+        # Compute urgency from leading indicators
+        urgency = _compute_urgency(state, edge)
+
+        # Size based on edge magnitude and urgency
+        size_factor = min(abs(edge) / 0.15, 1.0) * (0.5 + 0.5 * urgency)
+        amount = round(MAX_POSITION_SIZE * size_factor, 2)
+        amount = max(1.0, min(amount, MAX_POSITION_SIZE))
+
+        # Decide which token to buy
         if edge > 0:
-            # Our YES prob > market price → BUY YES
             token_id = market.token_id_yes
-            side = "BUY"
-            amount = min(MAX_POSITION_SIZE, MAX_POSITION_SIZE * (abs(edge) / 0.2))
         else:
-            # Our YES prob < market price → BUY NO (equivalent to selling YES)
             token_id = market.token_id_no
-            side = "BUY"
-            amount = min(MAX_POSITION_SIZE, MAX_POSITION_SIZE * (abs(edge) / 0.2))
 
         signal = TradeSignal(
             market=market,
             token_id=token_id,
-            side=side,
-            amount=round(amount, 2),
+            side="BUY",
+            amount=amount,
             edge=edge,
             our_probability=our_yes_prob,
             market_probability=market_yes_price,
             direction=our_direction,
             reasons=reasons,
+            urgency=urgency,
         )
         signals.append(signal)
 
-    # Sort by absolute edge (best opportunities first)
-    signals.sort(key=lambda s: abs(s.edge), reverse=True)
-
-    log.info("Generated %d trade signals", len(signals))
+    # Sort by urgency * |edge| (best immediate opportunities first)
+    signals.sort(key=lambda s: s.urgency * abs(s.edge), reverse=True)
     return signals
