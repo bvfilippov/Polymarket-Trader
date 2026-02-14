@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.binance_data import LiveMarketState, Spike, get_price_moves
-from src.config import MAX_POSITION_SIZE, MIN_EDGE, TRADE_COOLDOWN, get_logger
+from src.config import LIMIT_ORDER_OFFSET, MAX_POSITION_SIZE, MIN_EDGE, TRADE_COOLDOWN, get_logger
 from src.polymarket_client import BtcMarket
 
 log = get_logger(__name__)
@@ -39,6 +39,7 @@ class TradeSignal:
     market_price_fair: float  # our estimate of fair price
     spike_strength: float
     reasons: list[str]
+    limit_price: float = 0.0  # suggested limit order price
 
 
 # ─── Market analysis ──────────────────────────────────────────────
@@ -285,6 +286,17 @@ def generate_signals(
         amount = round(MAX_POSITION_SIZE * edge_factor * spike_factor, 2)
         amount = max(1.0, min(amount, MAX_POSITION_SIZE))
 
+        # Limit order price: buy at stale + small offset (still below fair)
+        if edge > MIN_EDGE:
+            # Buying YES: pay slightly above stale, well below fair
+            limit_price = min(stale_yes + LIMIT_ORDER_OFFSET, fair_yes - LIMIT_ORDER_OFFSET)
+            limit_price = max(0.01, min(0.99, limit_price))
+        else:
+            # Buying NO: stale NO price + offset
+            stale_no = market.current_price_no or (1.0 - stale_yes)
+            limit_price = min(stale_no + LIMIT_ORDER_OFFSET, 0.99)
+            limit_price = max(0.01, limit_price)
+
         signal = TradeSignal(
             market=market,
             token_id=token_id,
@@ -297,6 +309,7 @@ def generate_signals(
             market_price_fair=fair_yes,
             spike_strength=spike_strength,
             reasons=reasons,
+            limit_price=limit_price,
         )
         signals.append(signal)
 

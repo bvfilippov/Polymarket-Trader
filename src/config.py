@@ -38,6 +38,16 @@ LARGE_TRADE_THRESHOLD = float(os.getenv("LARGE_TRADE_THRESHOLD", "50000"))  # US
 CVD_WINDOW = int(os.getenv("CVD_WINDOW", "500"))
 TRADE_COOLDOWN = int(os.getenv("TRADE_COOLDOWN", "15"))  # shorter cooldown for lag arb
 
+# Position management / auto-exit
+TAKE_PROFIT_RATIO = float(os.getenv("TAKE_PROFIT_RATIO", "0.7"))  # exit when 70% of lag closed
+STOP_LOSS_BTC_REVERSAL = float(os.getenv("STOP_LOSS_BTC_REVERSAL", "0.15"))  # % BTC reversal to trigger stop
+MAX_POSITION_AGE = int(os.getenv("MAX_POSITION_AGE", "300"))  # max hold time (seconds)
+
+# Limit orders
+USE_LIMIT_ORDERS = os.getenv("USE_LIMIT_ORDERS", "true").lower() == "true"
+LIMIT_ORDER_OFFSET = float(os.getenv("LIMIT_ORDER_OFFSET", "0.005"))  # price offset for limit orders
+LIMIT_ORDER_TIMEOUT = int(os.getenv("LIMIT_ORDER_TIMEOUT", "10"))  # cancel unfilled after N seconds
+
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 

@@ -12,7 +12,7 @@ Binance: BTC растёт +0.3% за 10 секунд
 Polymarket: "BTC above $100k?" — цена YES всё ещё старая
          │
          ▼
-Бот: BUY YES → ждём пока Polymarket подтянется → profit
+Бот: BUY YES (limit order) → мониторим позицию → EXIT когда Polymarket подтянется
 ```
 
 **Не предсказываем** направление. **Реагируем** на движение которое уже произошло на Binance, но ещё не отразилось на Polymarket.
@@ -20,27 +20,41 @@ Polymarket: "BTC above $100k?" — цена YES всё ещё старая
 ## Архитектура
 
 ```
-Binance WebSocket
-  ├── aggTrade      → цена в реальном времени, поток сделок, киты
-  ├── kline_1m      → свечи для контекста
-  └── depth20@100ms → стакан, имбаланс
-         │
-         ▼
-  ┌─────────────────────┐
-  │  SpikeDetector      │  ← обнаружение резких движений (10s/30s/60s окна)
-  │  LiveMarketState    │  ← единый in-memory стейт
-  └────────┬────────────┘
-           │
-     ┌─────┴──────┐
-     ▼            ▼
-  [SPIKE]     [PERIODIC]     ← два пути срабатывания
-  мгновенно   каждые 2с
-     │            │
-     ▼            ▼
-  Refresh Polymarket prices
-  Estimate fair price (should be)
+Binance WebSocket                    Polymarket WebSocket
+  ├── aggTrade → цена, сделки        ├── market → цены в реальном времени
+  ├── kline_1m → свечи               └── book → orderbook updates
+  └── depth20  → стакан
+         │                                    │
+         ▼                                    ▼
+  ┌─────────────────────┐          ┌─────────────────────┐
+  │  SpikeDetector      │          │  PolymarketStream   │
+  │  LiveMarketState    │          │  (real-time prices)  │
+  └────────┬────────────┘          └────────┬────────────┘
+           │                                │
+     ┌─────┴──────┐                         │
+     ▼            ▼                         │
+  [SPIKE]     [PERIODIC]                    │
+  мгновенно   каждые 2с                    │
+     │            │                         │
+     ▼            ▼                         ▼
+  Estimate fair price (should be) ←── Use WS prices (no REST lag)
   Compare vs stale price (is now)
-  If lag > MIN_EDGE → TRADE
+  If lag > MIN_EDGE → LIMIT ORDER
+           │
+           ▼
+  ┌─────────────────────┐
+  │  PositionManager    │
+  │  ├── Take-profit    │  ← Polymarket догнала → SELL
+  │  ├── Stop-loss      │  ← BTC развернулся → SELL
+  │  └── Timeout        │  ← слишком долго держим → SELL
+  └─────────────────────┘
+           │
+           ▼
+  ┌─────────────────────┐
+  │  LagTracker         │
+  │  Измеряет реальный  │
+  │  лаг для калибровки │
+  └─────────────────────┘
 ```
 
 ## Два режима срабатывания
@@ -63,6 +77,26 @@ Binance WebSocket
 - Расстояние до ценового таргета (ближе = больший сдвиг вероятности)
 - Пересечение таргета (крестим $100k = резкий скачок вероятности)
 - Объём при спайке (больше объём = надёжнее движение)
+
+## Управление позициями
+
+Бот не просто покупает — он **управляет позициями**:
+
+- **Take-profit**: когда Polymarket цена догнала ≥70% от нашего fair value → SELL
+- **Stop-loss**: BTC развернулся ≥0.15% против нашего направления → SELL
+- **Timeout**: позиция открыта >5 мин (лаг должен был закрыться) → SELL
+
+## Limit orders
+
+Вместо FOK market orders (проскальзывание на тонком стакане), бот ставит **limit orders** по цене чуть выше stale — получаем лучший fill, всё ещё ниже fair value.
+
+## Измерение лага
+
+**LagTracker** записывает:
+- Когда BTC двинулся на Binance
+- Когда Polymarket подстроилась
+
+Собирает статистику: средний лаг, медиана, ошибка предсказания fair price. Используется для калибровки модели.
 
 ## Установка
 
@@ -94,3 +128,8 @@ python main.py run        # Нон-стоп бот (WebSocket)
 | `MAX_POSITION_SIZE` | Макс. позиция (USDC) | 10.0 |
 | `LARGE_TRADE_THRESHOLD` | Порог whale detection (USDT) | 50000 |
 | `DRY_RUN` | Без реальных сделок | true |
+| `TAKE_PROFIT_RATIO` | Закрыть при % закрытия лага | 0.7 |
+| `STOP_LOSS_BTC_REVERSAL` | Stop-loss при развороте BTC (%) | 0.15 |
+| `MAX_POSITION_AGE` | Макс. время удержания (сек) | 300 |
+| `USE_LIMIT_ORDERS` | Limit orders вместо FOK | true |
+| `LIMIT_ORDER_OFFSET` | Сдвиг цены limit order | 0.005 |

@@ -288,6 +288,24 @@ class PolymarketClient:
             log.error("Failed to fetch open orders: %s", e)
             return []
 
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel a specific order by ID."""
+        if DRY_RUN:
+            log.info("[DRY RUN] Would cancel order %s", order_id)
+            return True
+
+        if not self._authenticated:
+            return False
+
+        client = self._get_clob_client()
+        try:
+            client.cancel(order_id)
+            log.info("Order cancelled: %s", order_id)
+            return True
+        except Exception as e:
+            log.error("Failed to cancel order %s: %s", order_id, e)
+            return False
+
     def cancel_all_orders(self) -> bool:
         """Cancel all open orders."""
         if DRY_RUN:
