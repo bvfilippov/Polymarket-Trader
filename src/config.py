@@ -21,16 +21,22 @@ BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
 
 # Trading parameters
 MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", "10.0"))
-MIN_EDGE = float(os.getenv("MIN_EDGE", "0.03"))
+MIN_EDGE = float(os.getenv("MIN_EDGE", "0.02"))
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-# Real-time strategy parameters
-SIGNAL_EVAL_INTERVAL = float(os.getenv("SIGNAL_EVAL_INTERVAL", "5.0"))  # seconds
-MARKET_REFRESH_INTERVAL = int(os.getenv("MARKET_REFRESH_INTERVAL", "120"))  # seconds
-ORDERBOOK_DEPTH = int(os.getenv("ORDERBOOK_DEPTH", "20"))  # levels
+# Spike detection — the core of lag-arbitrage
+SPIKE_THRESHOLD_PCT = float(os.getenv("SPIKE_THRESHOLD_PCT", "0.15"))  # % move to trigger
+SPIKE_WINDOWS = [int(x) for x in os.getenv("SPIKE_WINDOWS", "10,30,60").split(",")]  # seconds
+VOLUME_SPIKE_MULTIPLIER = float(os.getenv("VOLUME_SPIKE_MULTIPLIER", "3.0"))  # vs avg
+
+# Real-time parameters
+SIGNAL_EVAL_INTERVAL = float(os.getenv("SIGNAL_EVAL_INTERVAL", "2.0"))  # seconds
+MARKET_REFRESH_INTERVAL = int(os.getenv("MARKET_REFRESH_INTERVAL", "30"))  # seconds (faster!)
+PRICE_REFRESH_ON_SPIKE = True  # re-fetch Polymarket prices when spike detected
+ORDERBOOK_DEPTH = int(os.getenv("ORDERBOOK_DEPTH", "20"))
 LARGE_TRADE_THRESHOLD = float(os.getenv("LARGE_TRADE_THRESHOLD", "50000"))  # USDT
-CVD_WINDOW = int(os.getenv("CVD_WINDOW", "300"))  # trades to keep
-TRADE_COOLDOWN = int(os.getenv("TRADE_COOLDOWN", "30"))  # seconds between trades
+CVD_WINDOW = int(os.getenv("CVD_WINDOW", "500"))
+TRADE_COOLDOWN = int(os.getenv("TRADE_COOLDOWN", "15"))  # shorter cooldown for lag arb
 
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
